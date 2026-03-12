@@ -29,12 +29,12 @@ The core logic lives in `src/lib.rs` and exposes two primitives:
 
 ## Run
 
-Open two terminals:
+Open two terminals (example binary):
 
 Terminal A:
 
 ```
-cargo run -- --host 127.0.0.1 --port 8443 \
+cargo run --example ping_pong -- --host 127.0.0.1 --port 8443 \
   --did did:web:localhost%3A8443 \
   --peer-did did:web:localhost%3A9443 \
   --peer-addr 127.0.0.1:9443
@@ -43,7 +43,7 @@ cargo run -- --host 127.0.0.1 --port 8443 \
 Terminal B:
 
 ```
-cargo run -- --host 127.0.0.1 --port 9443 \
+cargo run --example ping_pong -- --host 127.0.0.1 --port 9443 \
   --did did:web:localhost%3A9443 \
   --peer-did did:web:localhost%3A8443 \
   --peer-addr 127.0.0.1:8443
@@ -55,6 +55,18 @@ You should see logs for:
 - RPK verification allow/deny decisions
 - `ping -> pong` messages
 
+Optional bootstrap controls:
+- `--bootstrap-retries <n>` (default 30)
+- `--bootstrap-delay-secs <n>` (default 1)
+
+## Nix demo
+
+Run the two demo instances with interleaved, prefixed logs:
+
+```
+nix run
+```
+
 ## Local DNS identity (no /etc/hosts)
 
 To simulate in-cluster DNS names on localhost, split the identity host from the
@@ -63,7 +75,7 @@ connect address:
 Terminal A:
 
 ```
-cargo run -- --host 127.0.0.1 --port 8443 \
+cargo run --example ping_pong -- --host 127.0.0.1 --port 8443 \
   --did-host service-a.ns.svc.cluster.local \
   --peer-host service-b.ns.svc.cluster.local \
   --peer-addr 127.0.0.1:9443
@@ -72,7 +84,7 @@ cargo run -- --host 127.0.0.1 --port 8443 \
 Terminal B:
 
 ```
-cargo run -- --host 127.0.0.1 --port 9443 \
+cargo run --example ping_pong -- --host 127.0.0.1 --port 9443 \
   --did-host service-b.ns.svc.cluster.local \
   --peer-host service-a.ns.svc.cluster.local \
   --peer-addr 127.0.0.1:8443

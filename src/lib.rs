@@ -34,6 +34,21 @@ const ED25519_PUBKEY_MULTICODEC: [u8; 2] = [0xed, 0x01];
 const DID_WEB_PREFIX: &str = "did:web:";
 const ALPN_H2: &[u8] = b"h2";
 
+#[derive(Clone, Copy, Debug)]
+pub struct BootstrapConfig {
+    pub retries: usize,
+    pub delay: Duration,
+}
+
+impl Default for BootstrapConfig {
+    fn default() -> Self {
+        Self {
+            retries: BOOTSTRAP_RETRIES,
+            delay: Duration::from_secs(BOOTSTRAP_DELAY_SECS),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Listener {
     pub acceptor: TlsAcceptor,
@@ -72,6 +87,13 @@ pub struct Node {
 
 impl Node {
     pub fn new(did: impl Into<String>) -> Result<Self, BoxError> {
+        Self::new_with_trusted_keys(did, Vec::new())
+    }
+
+    pub fn new_with_trusted_keys(
+        did: impl Into<String>,
+        trusted_keys: Vec<Vec<u8>>,
+    ) -> Result<Self, BoxError> {
         let did = did.into();
         let identity = generate_identity()?;
         let did_json = Arc::new(build_did_json(&did, &identity.public_key)?);
@@ -79,12 +101,22 @@ impl Node {
             did,
             did_json,
             identity,
-            trusted_keys: Arc::new(RwLock::new(Vec::new())),
+            trusted_keys: Arc::new(RwLock::new(trusted_keys)),
         })
     }
 
     pub fn local_public_key_multibase(&self) -> Result<String, BoxError> {
         encode_multibase_ed25519(&self.identity.public_key)
+    }
+
+    pub fn set_trusted_keys(&self, keys: Vec<Vec<u8>>) {
+        let mut guard = self.trusted_keys.write().unwrap();
+        *guard = keys;
+    }
+
+    pub fn add_trusted_key(&self, key: Vec<u8>) {
+        let mut guard = self.trusted_keys.write().unwrap();
+        guard.push(key);
     }
 
     pub fn listen(&self) -> Result<Listener, BoxError> {
@@ -106,17 +138,38 @@ impl Node {
         self.dial_with_peer(peer, connect_addr).await
     }
 
+    pub async fn dial_with_config(
+        &self,
+        peer_did: &str,
+        connect_addr: Option<SocketAddr>,
+        config: BootstrapConfig,
+    ) -> Result<Dialer, BoxError> {
+        let peer = peer_from_did(peer_did)?;
+        self.dial_with_peer_config(peer, connect_addr, config).await
+    }
+
     pub async fn dial_with_peer(&self, peer: Peer, connect_addr: Option<SocketAddr>) -> Result<Dialer, BoxError> {
+        self.dial_with_peer_config(peer, connect_addr, BootstrapConfig::default())
+            .await
+    }
+
+    pub async fn dial_with_peer_config(
+        &self,
+        peer: Peer,
+        connect_addr: Option<SocketAddr>,
+        config: BootstrapConfig,
+    ) -> Result<Dialer, BoxError> {
         let bootstrap_config = build_client_config(
             self.identity.certified_key.clone(),
             Arc::new(NoVerifier),
             vec![ALPN_H2.to_vec()],
         )?;
-        let keys = fetch_peer_keys(
+        let keys = fetch_peer_keys_with_config(
             &peer.did_url,
             Arc::new(bootstrap_config),
             connect_addr,
             peer.server_name.clone(),
+            config,
         )
         .await?;
         {
@@ -134,6 +187,30 @@ impl Node {
             peer,
             connect_addr,
             peer_keys: keys,
+        })
+    }
+
+    pub fn dial_with_keys(
+        &self,
+        peer: Peer,
+        connect_addr: Option<SocketAddr>,
+        peer_keys: Vec<Vec<u8>>,
+    ) -> Result<Dialer, BoxError> {
+        {
+            let mut guard = self.trusted_keys.write().unwrap();
+            *guard = peer_keys.clone();
+        }
+        let verifier = Arc::new(PubkeyVerifier::new(self.trusted_keys.clone(), false));
+        let client_config = build_client_config(
+            self.identity.certified_key.clone(),
+            verifier,
+            vec![ALPN_H2.to_vec()],
+        )?;
+        Ok(Dialer {
+            client_config: Arc::new(client_config),
+            peer,
+            connect_addr,
+            peer_keys,
         })
     }
 
@@ -181,7 +258,12 @@ impl PubkeyVerifier {
                 short_hex(key),
                 allowed.len()
             );
-            Err(Error::General("untrusted public key".to_string()))
+            Err(Error::General(format!(
+                "untrusted public key spki_len={} spki_suffix={} trusted={}",
+                key.len(),
+                short_hex(key),
+                allowed.len()
+            )))
         }
     }
 }
@@ -494,10 +576,30 @@ pub async fn fetch_peer_keys(
     connect_addr: Option<SocketAddr>,
     server_name: ServerName<'static>,
 ) -> Result<Vec<Vec<u8>>, BoxError> {
+    fetch_peer_keys_with_config(
+        url,
+        client_config,
+        connect_addr,
+        server_name,
+        BootstrapConfig::default(),
+    )
+    .await
+}
+
+pub async fn fetch_peer_keys_with_config(
+    url: &Url,
+    client_config: Arc<ClientConfig>,
+    connect_addr: Option<SocketAddr>,
+    server_name: ServerName<'static>,
+    config: BootstrapConfig,
+) -> Result<Vec<Vec<u8>>, BoxError> {
     let mut last_err: Option<BoxError> = None;
 
-    for attempt in 1..=BOOTSTRAP_RETRIES {
-        eprintln!("fetching peer did (attempt {}/{}) {}", attempt, BOOTSTRAP_RETRIES, url);
+    for attempt in 1..=config.retries {
+        eprintln!(
+            "fetching peer did (attempt {}/{}) {}",
+            attempt, config.retries, url
+        );
         match send_request(
             url,
             client_config.clone(),
@@ -519,12 +621,14 @@ pub async fn fetch_peer_keys(
             Err(err) => last_err = Some(err),
         }
 
-        if attempt < BOOTSTRAP_RETRIES {
+        if attempt < config.retries {
             eprintln!(
                 "peer did fetch failed (attempt {}/{}); retrying in {}s",
-                attempt, BOOTSTRAP_RETRIES, BOOTSTRAP_DELAY_SECS
+                attempt,
+                config.retries,
+                config.delay.as_secs()
             );
-            sleep(Duration::from_secs(BOOTSTRAP_DELAY_SECS)).await;
+            sleep(config.delay).await;
         }
     }
 

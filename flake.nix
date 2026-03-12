@@ -62,11 +62,65 @@
             inherit cargoArtifacts;
           }
         );
+
+        ping-pong-example = craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            cargoBuildCommand = "cargo build --example ping_pong";
+            doCheck = false;
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/bin
+              if [ -f target/release/examples/ping_pong ]; then
+                cp target/release/examples/ping_pong $out/bin/
+              else
+                found="$(find target -path '*/release/examples/ping_pong' -type f | head -n1)"
+                if [ -z "$found" ]; then
+                  echo "ping_pong example binary not found" >&2
+                  exit 1
+                fi
+                cp "$found" $out/bin/ping_pong
+              fi
+              runHook postInstall
+            '';
+          }
+        );
+
+        demo-app = pkgs.writeShellApplication {
+          name = "did-web-rpk-tls-demo";
+          runtimeInputs = [
+            pkgs.coreutils
+            pkgs.gnused
+          ];
+          text = ''
+            set -euo pipefail
+
+            bin="${ping-pong-example}/bin/ping_pong"
+
+            trap 'kill $(jobs -p) 2>/dev/null || true' EXIT INT TERM
+
+            ${pkgs.coreutils}/bin/stdbuf -oL -eL "$bin" --host 127.0.0.1 --port 8443 \
+              --did did:web:localhost%3A8443 \
+              --peer-did did:web:localhost%3A9443 \
+              --peer-addr 127.0.0.1:9443 \
+              2>&1 | ${pkgs.gnused}/bin/sed -u 's/^/[service-a] /' &
+
+            ${pkgs.coreutils}/bin/stdbuf -oL -eL "$bin" --host 127.0.0.1 --port 9443 \
+              --did did:web:localhost%3A9443 \
+              --peer-did did:web:localhost%3A8443 \
+              --peer-addr 127.0.0.1:8443 \
+              2>&1 | ${pkgs.gnused}/bin/sed -u 's/^/[service-b] /' &
+
+            wait
+          '';
+        };
       in
       {
         checks = {
           # Build the crate as part of `nix flake check` for convenience
           inherit my-crate;
+          inherit ping-pong-example;
 
           # Run clippy (and deny all warnings) on the crate source,
           # again, reusing the dependency artifacts from above.
@@ -129,10 +183,14 @@
 
         packages = {
           default = my-crate;
+          ping-pong-example = ping-pong-example;
         };
 
         apps.default = flake-utils.lib.mkApp {
-          drv = my-crate;
+          drv = demo-app;
+        };
+        apps.demo = flake-utils.lib.mkApp {
+          drv = demo-app;
         };
 
         devShells.default = craneLib.devShell {

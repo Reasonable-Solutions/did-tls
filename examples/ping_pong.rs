@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 use tokio::time::sleep;
 use url::Url;
 
-use quick_start::{
+use did_web_rpk_tls::{
     build_did_from_host, peer_from_did, peer_from_did_url, send_request, BoxError, BootstrapConfig,
     Dialer, Node, Peer,
 };

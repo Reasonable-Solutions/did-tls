@@ -133,27 +133,73 @@ impl Node {
         })
     }
 
-    pub async fn dial(&self, peer_did: &str, connect_addr: Option<SocketAddr>) -> Result<Dialer, BoxError> {
-        let peer = peer_from_did(peer_did)?;
-        self.dial_with_peer(peer, connect_addr).await
+    pub async fn dial(&self, peer_did: &str) -> Result<Dialer, BoxError> {
+        self.dial_with_config(peer_did, BootstrapConfig::default())
+            .await
     }
 
     pub async fn dial_with_config(
         &self,
         peer_did: &str,
-        connect_addr: Option<SocketAddr>,
         config: BootstrapConfig,
     ) -> Result<Dialer, BoxError> {
         let peer = peer_from_did(peer_did)?;
-        self.dial_with_peer_config(peer, connect_addr, config).await
+        self.dial_with_peer_config(peer, config).await
     }
 
-    pub async fn dial_with_peer(&self, peer: Peer, connect_addr: Option<SocketAddr>) -> Result<Dialer, BoxError> {
-        self.dial_with_peer_config(peer, connect_addr, BootstrapConfig::default())
+    pub async fn dial_with_addr(
+        &self,
+        peer_did: &str,
+        connect_addr: SocketAddr,
+    ) -> Result<Dialer, BoxError> {
+        self.dial_with_addr_config(peer_did, connect_addr, BootstrapConfig::default())
+            .await
+    }
+
+    pub async fn dial_with_addr_config(
+        &self,
+        peer_did: &str,
+        connect_addr: SocketAddr,
+        config: BootstrapConfig,
+    ) -> Result<Dialer, BoxError> {
+        let peer = peer_from_did(peer_did)?;
+        self.dial_with_peer_addr_config(peer, connect_addr, config)
+            .await
+    }
+
+    pub async fn dial_with_peer(&self, peer: Peer) -> Result<Dialer, BoxError> {
+        self.dial_with_peer_config(peer, BootstrapConfig::default())
             .await
     }
 
     pub async fn dial_with_peer_config(
+        &self,
+        peer: Peer,
+        config: BootstrapConfig,
+    ) -> Result<Dialer, BoxError> {
+        self.dial_with_peer_addr_config_inner(peer, None, config).await
+    }
+
+    pub async fn dial_with_peer_addr(
+        &self,
+        peer: Peer,
+        connect_addr: SocketAddr,
+    ) -> Result<Dialer, BoxError> {
+        self.dial_with_peer_addr_config(peer, Some(connect_addr), BootstrapConfig::default())
+            .await
+    }
+
+    pub async fn dial_with_peer_addr_config(
+        &self,
+        peer: Peer,
+        connect_addr: SocketAddr,
+        config: BootstrapConfig,
+    ) -> Result<Dialer, BoxError> {
+        self.dial_with_peer_addr_config_inner(peer, Some(connect_addr), config)
+            .await
+    }
+
+    async fn dial_with_peer_addr_config_inner(
         &self,
         peer: Peer,
         connect_addr: Option<SocketAddr>,
@@ -191,6 +237,23 @@ impl Node {
     }
 
     pub fn dial_with_keys(
+        &self,
+        peer: Peer,
+        peer_keys: Vec<Vec<u8>>,
+    ) -> Result<Dialer, BoxError> {
+        self.dial_with_keys_addr_inner(peer, None, peer_keys)
+    }
+
+    pub fn dial_with_keys_addr(
+        &self,
+        peer: Peer,
+        connect_addr: SocketAddr,
+        peer_keys: Vec<Vec<u8>>,
+    ) -> Result<Dialer, BoxError> {
+        self.dial_with_keys_addr_inner(peer, Some(connect_addr), peer_keys)
+    }
+
+    fn dial_with_keys_addr_inner(
         &self,
         peer: Peer,
         connect_addr: Option<SocketAddr>,

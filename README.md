@@ -25,7 +25,11 @@ There are no X.509 certificates. The TLS handshake uses raw public keys only.
 
 The core logic lives in `src/lib.rs` and exposes two primitives:
 - `Node::listen()` -> `Listener` (server-side TLS acceptor + DID doc)
-- `Node::dial(peer_did, connect_addr)` -> `Dialer` (client config + peer metadata)
+- `Node::dial(peer_did)` -> `Dialer` (client config + peer metadata)
+
+Dial-by-DID is the default. An explicit connect address is only needed when the
+DNS identity differs from the connect address (e.g., localhost demos or split
+identity vs transport).
 
 ## Run
 
@@ -36,8 +40,7 @@ Terminal A:
 ```
 cargo run --example ping_pong -- --host 127.0.0.1 --port 8443 \
   --did did:web:localhost%3A8443 \
-  --peer-did did:web:localhost%3A9443 \
-  --peer-addr 127.0.0.1:9443
+  --peer-did did:web:localhost%3A9443
 ```
 
 Terminal B:
@@ -45,8 +48,7 @@ Terminal B:
 ```
 cargo run --example ping_pong -- --host 127.0.0.1 --port 9443 \
   --did did:web:localhost%3A9443 \
-  --peer-did did:web:localhost%3A8443 \
-  --peer-addr 127.0.0.1:8443
+  --peer-did did:web:localhost%3A8443
 ```
 
 You should see logs for:

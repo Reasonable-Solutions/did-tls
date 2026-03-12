@@ -99,9 +99,15 @@ async fn main() -> Result<(), BoxError> {
             retries: args.bootstrap_retries,
             delay: Duration::from_secs(args.bootstrap_delay_secs),
         };
-        let dialer = node
-            .dial_with_peer_config(peer_config.peer, peer_config.connect_addr, bootstrap)
-            .await?;
+        let dialer = match peer_config.connect_addr {
+            Some(addr) => {
+                node.dial_with_peer_addr_config(peer_config.peer, addr, bootstrap)
+                    .await?
+            }
+            None => node
+                .dial_with_peer_config(peer_config.peer, bootstrap)
+                .await?,
+        };
         eprintln!("loaded {} peer public key(s)", dialer.peer_keys.len());
         for (idx, key) in dialer.peer_keys.iter().enumerate() {
             eprintln!(

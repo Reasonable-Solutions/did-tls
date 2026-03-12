@@ -63,15 +63,25 @@ impl Node {
     pub fn set_trusted_keys(&self, keys: Vec<Vec<u8>>);
     pub fn add_trusted_key(&self, key: Vec<u8>);
     pub fn listen(&self) -> Result<Listener, BoxError>;
-    pub async fn dial(&self, peer_did: &str, connect_addr: Option<SocketAddr>)
+    pub async fn dial(&self, peer_did: &str)
         -> Result<Dialer, BoxError>;
-    pub async fn dial_with_config(&self, peer_did: &str, connect_addr: Option<SocketAddr>, config: BootstrapConfig)
+    pub async fn dial_with_config(&self, peer_did: &str, config: BootstrapConfig)
         -> Result<Dialer, BoxError>;
-    pub async fn dial_with_peer(&self, peer: Peer, connect_addr: Option<SocketAddr>)
+    pub async fn dial_with_addr(&self, peer_did: &str, connect_addr: SocketAddr)
         -> Result<Dialer, BoxError>;
-    pub async fn dial_with_peer_config(&self, peer: Peer, connect_addr: Option<SocketAddr>, config: BootstrapConfig)
+    pub async fn dial_with_addr_config(&self, peer_did: &str, connect_addr: SocketAddr, config: BootstrapConfig)
         -> Result<Dialer, BoxError>;
-    pub fn dial_with_keys(&self, peer: Peer, connect_addr: Option<SocketAddr>, peer_keys: Vec<Vec<u8>>)
+    pub async fn dial_with_peer(&self, peer: Peer)
+        -> Result<Dialer, BoxError>;
+    pub async fn dial_with_peer_config(&self, peer: Peer, config: BootstrapConfig)
+        -> Result<Dialer, BoxError>;
+    pub async fn dial_with_peer_addr(&self, peer: Peer, connect_addr: SocketAddr)
+        -> Result<Dialer, BoxError>;
+    pub async fn dial_with_peer_addr_config(&self, peer: Peer, connect_addr: SocketAddr, config: BootstrapConfig)
+        -> Result<Dialer, BoxError>;
+    pub fn dial_with_keys(&self, peer: Peer, peer_keys: Vec<Vec<u8>>)
+        -> Result<Dialer, BoxError>;
+    pub fn dial_with_keys_addr(&self, peer: Peer, connect_addr: SocketAddr, peer_keys: Vec<Vec<u8>>)
         -> Result<Dialer, BoxError>;
     pub fn trusted_keys(&self) -> Arc<RwLock<Vec<Vec<u8>>>>;
 }
@@ -199,7 +209,7 @@ let tls_acceptor = listener.acceptor.clone();
 ### 9.2 Client
 ```
 let node = Node::new("did:web:client.ns.svc.cluster.local")?;
-let dialer = node.dial("did:web:service.ns.svc.cluster.local", None).await?;
+let dialer = node.dial("did:web:service.ns.svc.cluster.local").await?;
 
 let response = send_request(
     &dialer.peer.base_url.join("ping")?,

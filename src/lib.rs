@@ -185,7 +185,7 @@ impl Node {
         peer: Peer,
         connect_addr: SocketAddr,
     ) -> Result<Dialer, BoxError> {
-        self.dial_with_peer_addr_config(peer, Some(connect_addr), BootstrapConfig::default())
+        self.dial_with_peer_addr_config(peer, connect_addr, BootstrapConfig::default())
             .await
     }
 

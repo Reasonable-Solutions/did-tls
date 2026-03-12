@@ -1,8 +1,10 @@
+use bytes::Bytes;
 use clap::Parser;
-use hyper::body::to_bytes;
-use hyper::server::conn::Http;
+use http_body_util::{BodyExt, Full};
+use hyper::server::conn::http2::Builder as Http2Builder;
 use hyper::service::service_fn;
-use hyper::{Body, Method, Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -152,9 +154,8 @@ async fn run_server(
             match acceptor.accept(stream).await {
                 Ok(tls_stream) => {
                     let service = service_fn(move |req| handle(req, state.clone()));
-                    if let Err(err) = Http::new()
-                        .http2_only(true)
-                        .serve_connection(tls_stream, service)
+                    if let Err(err) = Http2Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(tls_stream), service)
                         .await
                     {
                         eprintln!("connection error: {}", err);
@@ -167,28 +168,28 @@ async fn run_server(
 }
 
 async fn handle(
-    req: Request<Body>,
+    req: Request<hyper::body::Incoming>,
     state: Arc<AppState>,
-) -> std::result::Result<Response<Body>, hyper::Error> {
+) -> std::result::Result<Response<Full<Bytes>>, hyper::Error> {
     let response = match (req.method(), req.uri().path()) {
         (&Method::GET, "/.well-known/did.json") => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/did+json")
-            .body(Body::from(state.did_json.as_str().to_owned()))
+            .body(Full::new(Bytes::from(state.did_json.as_str().to_owned())))
             .unwrap(),
         (&Method::POST, "/ping") => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/plain")
-            .body(Body::from("pong"))
+            .body(Full::new(Bytes::from("pong")))
             .unwrap(),
         (&Method::POST, "/pong") => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/plain")
-            .body(Body::from("ping"))
+            .body(Full::new(Bytes::from("ping")))
             .unwrap(),
         _ => Response::builder()
             .status(StatusCode::NOT_FOUND)
-            .body(Body::from("not found"))
+            .body(Full::new(Bytes::from("not found")))
             .unwrap(),
     };
     Ok(response)
@@ -197,7 +198,7 @@ async fn handle(
 async fn ping_loop(dialer: Dialer, interval: Duration) -> Result<()> {
     loop {
         let url = dialer.peer.base_url.join("ping")?;
-        let body = Body::from("ping");
+        let body = Full::new(Bytes::from("ping"));
         let response = send_request(
             &url,
             dialer.client_config.clone(),
@@ -207,8 +208,10 @@ async fn ping_loop(dialer: Dialer, interval: Duration) -> Result<()> {
             Some(dialer.peer.server_name.clone()),
         )
         .await?;
-        let bytes = to_bytes(response.into_body()).await?;
-        println!("ping -> {}", String::from_utf8_lossy(bytes.as_ref()));
+        let body = response.into_body().collect().await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
+            .to_bytes();
+        println!("ping -> {}", String::from_utf8_lossy(body.as_ref()));
         sleep(interval).await;
     }
 }

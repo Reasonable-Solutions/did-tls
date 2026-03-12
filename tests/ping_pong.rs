@@ -1,10 +1,12 @@
 #![cfg(feature = "http")]
 
+use bytes::Bytes;
 use did_web_rpk_tls::{send_request, Node, Result};
-use hyper::body::to_bytes;
-use hyper::server::conn::Http;
+use http_body_util::{BodyExt, Full};
+use hyper::server::conn::http2::Builder as Http2Builder;
 use hyper::service::service_fn;
-use hyper::{Body, Method, Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::time::{timeout, Duration};
@@ -46,9 +48,8 @@ async fn ping_pong_over_rpk_mtls() -> Result<()> {
                         match acceptor.accept(stream).await {
                             Ok(tls_stream) => {
                                 let service = service_fn(move |req| handle(req, did_json.clone()));
-                                if let Err(err) = Http::new()
-                                    .http2_only(true)
-                                    .serve_connection(tls_stream, service)
+                                if let Err(err) = Http2Builder::new(TokioExecutor::new())
+                                    .serve_connection(TokioIo::new(tls_stream), service)
                                     .await
                                 {
                                     eprintln!("connection error: {}", err);
@@ -84,15 +85,17 @@ async fn ping_pong_over_rpk_mtls() -> Result<()> {
             &url,
             dialer.client_config.clone(),
             Method::POST,
-            Some(Body::from("ping")),
+            Some(Full::new(Bytes::from("ping"))),
             dialer.connect_addr,
             Some(dialer.peer.server_name.clone()),
         ),
     )
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "request timeout"))??;
-    let bytes = to_bytes(response.into_body()).await?;
-    assert_eq!(bytes.as_ref(), b"pong");
+    let body = response.into_body().collect().await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
+        .to_bytes();
+    assert_eq!(body.as_ref(), b"pong");
 
     let _ = shutdown_tx.send(());
     let _ = timeout(Duration::from_secs(5), server_task).await;
@@ -101,23 +104,23 @@ async fn ping_pong_over_rpk_mtls() -> Result<()> {
 }
 
 async fn handle(
-    req: Request<Body>,
+    req: Request<hyper::body::Incoming>,
     did_json: Arc<String>,
-) -> std::result::Result<Response<Body>, hyper::Error> {
+) -> std::result::Result<Response<Full<Bytes>>, hyper::Error> {
     let response = match (req.method(), req.uri().path()) {
         (&Method::GET, "/.well-known/did.json") => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/did+json")
-            .body(Body::from(did_json.as_str().to_owned()))
+            .body(Full::new(Bytes::from(did_json.as_str().to_owned())))
             .unwrap(),
         (&Method::POST, "/ping") => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/plain")
-            .body(Body::from("pong"))
+            .body(Full::new(Bytes::from("pong")))
             .unwrap(),
         _ => Response::builder()
             .status(StatusCode::NOT_FOUND)
-            .body(Body::from("not found"))
+            .body(Full::new(Bytes::from("not found")))
             .unwrap(),
     };
     Ok(response)
@@ -160,9 +163,8 @@ async fn reject_unknown_peer_keys() -> Result<()> {
                         match acceptor.accept(stream).await {
                             Ok(tls_stream) => {
                                 let service = service_fn(move |req| handle(req, did_json.clone()));
-                                let _ = Http::new()
-                                    .http2_only(true)
-                                    .serve_connection(tls_stream, service)
+                                let _ = Http2Builder::new(TokioExecutor::new())
+                                    .serve_connection(TokioIo::new(tls_stream), service)
                                     .await;
                             }
                             Err(err) => eprintln!("tls error: {}", err),
@@ -187,7 +189,7 @@ async fn reject_unknown_peer_keys() -> Result<()> {
             &url,
             dialer.client_config.clone(),
             Method::POST,
-            Some(Body::from("ping")),
+            Some(Full::new(Bytes::from("ping"))),
             dialer.connect_addr,
             Some(dialer.peer.server_name.clone()),
         ),

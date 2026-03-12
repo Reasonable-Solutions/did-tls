@@ -1,10 +1,11 @@
 use bs58;
+use bytes::Bytes;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 #[cfg(feature = "http")]
-use hyper::body::to_bytes;
+use http_body_util::{BodyExt, Full};
 #[cfg(feature = "http")]
-use hyper::{Body, Method, Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode};
 use rand_core::OsRng;
 use rustls::client::AlwaysResolvesClientRawPublicKeys;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -90,10 +91,13 @@ pub enum NetworkError {
     Url(#[from] url::ParseError),
     #[cfg(feature = "http")]
     #[error("http: {0}")]
-    Http(#[from] hyper::Error),
+    Http(String),
     #[cfg(feature = "http")]
     #[error("http request: {0}")]
     HttpRequest(#[from] hyper::http::Error),
+    #[cfg(feature = "http")]
+    #[error("hyper: {0}")]
+    Hyper(#[from] hyper::Error),
 }
 
 pub type ResolveResult<T> = std::result::Result<T, ResolveError>;
@@ -119,7 +123,7 @@ impl From<url::ParseError> for Error {
 #[cfg(feature = "http")]
 impl From<hyper::Error> for Error {
     fn from(err: hyper::Error) -> Self {
-        Error::Network(NetworkError::Http(err))
+        Error::Network(NetworkError::Hyper(err))
     }
 }
 
@@ -214,7 +218,10 @@ pub struct Node {
     trusted_keys: Arc<RwLock<HashMap<String, Vec<Vec<u8>>>>>,
 }
 
+const ENV_PRIVATE_KEY: &str = "DID_TLS_PRIVATE_KEY";
+
 impl Node {
+    /// Create a node that generates a fresh Ed25519 keypair.
     pub fn new(did: impl Into<String>) -> Result<Self> {
         Self::new_with_trusted_keys(did, HashMap::new())
     }
@@ -232,6 +239,50 @@ impl Node {
             identity,
             trusted_keys: Arc::new(RwLock::new(trusted_keys)),
         })
+    }
+
+    /// Create a node from an existing Ed25519 signing key.
+    pub fn from_signing_key(
+        did: impl Into<String>,
+        signing_key: SigningKey,
+    ) -> Result<Self> {
+        Self::from_signing_key_with_trusted_keys(did, signing_key, HashMap::new())
+    }
+
+    pub fn from_signing_key_with_trusted_keys(
+        did: impl Into<String>,
+        signing_key: SigningKey,
+        trusted_keys: HashMap<String, Vec<Vec<u8>>>,
+    ) -> Result<Self> {
+        let did = did.into();
+        let identity = identity_from_signing_key(signing_key)?;
+        let did_json = Arc::new(build_did_json(&did, &identity.public_key)?);
+        Ok(Self {
+            did,
+            did_json,
+            identity,
+            trusted_keys: Arc::new(RwLock::new(trusted_keys)),
+        })
+    }
+
+    /// Create a node from the `DID_TLS_PRIVATE_KEY` env var (PKCS#8 PEM or
+    /// base64-encoded PKCS#8 DER). Falls back to generating a fresh keypair
+    /// if the variable is not set.
+    pub fn from_env(did: impl Into<String>) -> Result<Self> {
+        Self::from_env_with_trusted_keys(did, HashMap::new())
+    }
+
+    pub fn from_env_with_trusted_keys(
+        did: impl Into<String>,
+        trusted_keys: HashMap<String, Vec<Vec<u8>>>,
+    ) -> Result<Self> {
+        match std::env::var(ENV_PRIVATE_KEY) {
+            Ok(value) => {
+                let signing_key = parse_private_key(&value)?;
+                Self::from_signing_key_with_trusted_keys(did, signing_key, trusted_keys)
+            }
+            Err(_) => Self::new_with_trusted_keys(did, trusted_keys),
+        }
     }
 
     pub fn local_public_key_multibase(&self) -> Result<String> {
@@ -883,10 +934,10 @@ pub async fn send_request(
     url: &Url,
     client_config: Arc<ClientConfig>,
     method: Method,
-    body: Option<Body>,
+    body: Option<Full<Bytes>>,
     connect_addr: Option<SocketAddr>,
     server_name: Option<ServerName<'static>>,
-) -> Result<Response<Body>> {
+) -> Result<Response<hyper::body::Incoming>> {
     let host = url
         .host_str()
         .ok_or_else(|| {
@@ -920,10 +971,12 @@ pub async fn send_request(
         .await
         .map_err(map_tls_io_error)?;
 
-    let (mut sender, connection) = hyper::client::conn::Builder::new()
-        .http2_only(true)
-        .handshake(tls_stream)
-        .await?;
+    let (mut sender, connection) = hyper::client::conn::http2::handshake(
+        hyper_util::rt::TokioExecutor::new(),
+        hyper_util::rt::TokioIo::new(tls_stream),
+    )
+    .await
+    .map_err(|e| NetworkError::Http(e.to_string()))?;
 
     tokio::spawn(async move {
         if let Err(err) = connection.await {
@@ -934,9 +987,12 @@ pub async fn send_request(
     let request = Request::builder()
         .method(method)
         .uri(url.as_str())
-        .body(body.unwrap_or_else(Body::empty))?;
+        .body(body.unwrap_or_else(|| Full::new(Bytes::new())))?;
 
-    let response = sender.send_request(request).await?;
+    let response = sender
+        .send_request(request)
+        .await
+        .map_err(|e| NetworkError::Http(e.to_string()))?;
     Ok(response)
 }
 
@@ -987,8 +1043,10 @@ pub async fn fetch_peer_keys_with_config(
         {
             Ok(response) => {
                 if response.status() == StatusCode::OK {
-                    let bytes = to_bytes(response.into_body()).await?;
-                    let doc: serde_json::Value = serde_json::from_slice(bytes.as_ref())
+                    let body = response.into_body().collect().await
+                        .map_err(|e| NetworkError::Http(e.to_string()))?
+                        .to_bytes();
+                    let doc: serde_json::Value = serde_json::from_slice(body.as_ref())
                         .map_err(|err| ResolveError::InvalidDocument {
                             did: expected_did.to_string(),
                             reason: err.to_string(),
@@ -1085,8 +1143,7 @@ fn extract_keys_from_did(doc: &serde_json::Value, expected_did: &str) -> Result<
     Ok(keys)
 }
 
-fn generate_identity() -> Result<Identity> {
-    let signing_key = SigningKey::generate(&mut OsRng);
+fn identity_from_signing_key(signing_key: SigningKey) -> Result<Identity> {
     let verifying_key = signing_key.verifying_key();
     let public_key = verifying_key.to_bytes().to_vec();
 
@@ -1112,6 +1169,87 @@ fn generate_identity() -> Result<Identity> {
         certified_key,
         public_key,
     })
+}
+
+fn generate_identity() -> Result<Identity> {
+    identity_from_signing_key(SigningKey::generate(&mut OsRng))
+}
+
+fn parse_private_key(value: &str) -> Result<SigningKey> {
+    let value = value.trim();
+
+    // Try PKCS#8 PEM (-----BEGIN PRIVATE KEY-----)
+    if value.starts_with("-----") {
+        let base64_lines: String = value
+            .lines()
+            .filter(|line| !line.starts_with("-----"))
+            .flat_map(|line| line.split_whitespace())
+            .collect();
+        let der = base64_decode(&base64_lines).map_err(|e| {
+            IdentityError::Key(format!("invalid PEM base64: {}", e))
+        })?;
+        return signing_key_from_pkcs8_der(&der);
+    }
+
+    // Try raw base64-encoded PKCS#8 DER
+    let der = base64_decode(value).map_err(|e| {
+        IdentityError::Key(format!("invalid base64 private key: {}", e))
+    })?;
+    signing_key_from_pkcs8_der(&der)
+}
+
+fn signing_key_from_pkcs8_der(der: &[u8]) -> Result<SigningKey> {
+    use ed25519_dalek::pkcs8::DecodePrivateKey;
+    SigningKey::from_pkcs8_der(der)
+        .map_err(|e| IdentityError::Key(format!("invalid PKCS#8 Ed25519 key: {}", e)).into())
+}
+
+fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
+    // Simple base64 decoder (standard alphabet + padding)
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in input.as_bytes() {
+        if b == b'=' || b == b'\n' || b == b'\r' || b == b' ' {
+            continue;
+        }
+        let val = TABLE.iter().position(|&c| c == b)
+            .ok_or_else(|| format!("invalid base64 byte: {}", b as char))? as u32;
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 fn build_did_json(did: &str, public_key: &[u8]) -> Result<String> {
@@ -1280,5 +1418,67 @@ mod tests {
         let verifier = PeerVerifier::new(Arc::new(RwLock::new(map)), did_a.to_string());
         let cert = CertificateDer::from(key_b);
         assert!(verifier.check_key(&cert).is_err());
+    }
+
+    #[test]
+    fn node_from_signing_key_preserves_identity() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let expected_pub = signing_key.verifying_key().to_bytes().to_vec();
+        let node = Node::from_signing_key("did:web:example.com", signing_key).unwrap();
+        assert_eq!(node.identity.public_key, expected_pub);
+    }
+
+    #[test]
+    fn node_from_signing_key_produces_valid_did_json() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let node = Node::from_signing_key("did:web:example.com", signing_key).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&node.did_json).unwrap();
+        let keys = extract_keys_from_did(&doc, "did:web:example.com").unwrap();
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[test]
+    fn parse_private_key_pem_round_trip() {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let expected_pub = signing_key.verifying_key().to_bytes().to_vec();
+        let pkcs8_der = signing_key.to_pkcs8_der().unwrap();
+        // Build a PEM manually
+        let b64 = base64_encode(pkcs8_der.as_bytes());
+        let pem = format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----", b64);
+        let parsed = parse_private_key(&pem).unwrap();
+        assert_eq!(parsed.verifying_key().to_bytes().to_vec(), expected_pub);
+    }
+
+    #[test]
+    fn parse_private_key_base64_der() {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let expected_pub = signing_key.verifying_key().to_bytes().to_vec();
+        let pkcs8_der = signing_key.to_pkcs8_der().unwrap();
+        let b64 = base64_encode(pkcs8_der.as_bytes());
+        let parsed = parse_private_key(&b64).unwrap();
+        assert_eq!(parsed.verifying_key().to_bytes().to_vec(), expected_pub);
+    }
+
+    #[test]
+    fn node_from_env_falls_back_to_generated() {
+        // Ensure the env var is not set
+        std::env::remove_var(ENV_PRIVATE_KEY);
+        let node = Node::from_env("did:web:example.com").unwrap();
+        assert_eq!(node.identity.public_key.len(), 32);
+    }
+
+    #[test]
+    fn node_from_env_reads_key() {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let expected_pub = signing_key.verifying_key().to_bytes().to_vec();
+        let pkcs8_der = signing_key.to_pkcs8_der().unwrap();
+        let b64 = base64_encode(pkcs8_der.as_bytes());
+        std::env::set_var(ENV_PRIVATE_KEY, &b64);
+        let node = Node::from_env("did:web:example.com").unwrap();
+        assert_eq!(node.identity.public_key, expected_pub);
+        std::env::remove_var(ENV_PRIVATE_KEY);
     }
 }

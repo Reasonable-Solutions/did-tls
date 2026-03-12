@@ -69,21 +69,6 @@
             inherit cargoArtifacts;
             cargoBuildCommand = "cargo build --example ping_pong";
             doCheck = false;
-            installPhase = ''
-              runHook preInstall
-              mkdir -p $out/bin
-              if [ -f target/release/examples/ping_pong ]; then
-                cp target/release/examples/ping_pong $out/bin/
-              else
-                found="$(find target -path '*/release/examples/ping_pong' -type f | head -n1)"
-                if [ -z "$found" ]; then
-                  echo "ping_pong example binary not found" >&2
-                  exit 1
-                fi
-                cp "$found" $out/bin/ping_pong
-              fi
-              runHook postInstall
-            '';
           }
         );
 

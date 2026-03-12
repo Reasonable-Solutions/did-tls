@@ -29,6 +29,7 @@ This crate is intended for service-to-service use in controlled environments (e.
 pub enum Error { /* structured error variants */ }
 
 pub type Result<T> = std::result::Result<T, Error>;
+pub type ResolveResult<T> = std::result::Result<T, ResolveError>;
 
 pub struct Node {
     pub did: String,
@@ -149,7 +150,7 @@ pub async fn fetch_peer_keys_with_config(
 
 ```
 pub trait DidResolver: Send + Sync {
-    fn resolve(&self, did: &str) -> Result<Vec<Vec<u8>>, Error>;
+    fn resolve(&self, did: &str) -> ResolveResult<Vec<Vec<u8>>>;
 }
 
 pub struct StaticResolver { /* map of did -> keys */ }
@@ -218,7 +219,11 @@ Implement custom verifiers:
 - Future: a cache TTL or background refresh policy for peer keys.
 
 ## 8. Error behavior
-- All public APIs return `Result<T>` with a structured `Error`.
+- All public APIs return `Result<T>` with a structured `Error` (via `thiserror`).
+- Top-level categories: `Identity`, `Resolution`, `TlsPeerRejected`, `Network`.
+- Resolution errors are specific: `FetchFailed`, `InvalidDid`, `InvalidDocument`,
+  `IdMismatch`, `NoSuitableKey`, `InvalidServerName`. The DID string is included
+  in relevant variants.
 - Error messages should be stable and human-readable (useful in logs).
 - Verification failures should identify the SPKI length and a short suffix to assist debugging.
 

@@ -32,89 +32,101 @@ use tokio_rustls::TlsAcceptor;
 #[cfg(feature = "http")]
 use tokio_rustls::TlsConnector;
 use url::Url;
+use thiserror::Error as ThisError;
 
-#[derive(Debug)]
+#[derive(ThisError, Debug)]
 pub enum Error {
-    InvalidDid(String),
-    DidDocument(String),
-    Resolution(String),
+    #[error("identity misconfigured: {0}")]
+    Identity(#[from] IdentityError),
+    #[error(transparent)]
+    Resolution(#[from] ResolveError),
+    #[error("tls handshake rejected peer: {0}")]
+    TlsPeerRejected(#[from] TlsPeerError),
+    #[error("network error: {0}")]
+    Network(#[from] NetworkError),
+}
+
+#[derive(ThisError, Debug)]
+pub enum IdentityError {
+    #[error("missing identity: {0}")]
+    Missing(String),
+    #[error("invalid identity did {did}: {reason}")]
+    InvalidDid { did: String, reason: String },
+    #[error("invalid identity document: {0}")]
+    Document(String),
+    #[error("key generation failed: {0}")]
     Key(String),
-    Transport(String),
-    Io(std::io::Error),
-    Url(url::ParseError),
-    Json(serde_json::Error),
-    Base58(bs58::decode::Error),
-    Utf8(std::str::Utf8Error),
-    AddrParse(std::net::AddrParseError),
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::InvalidDid(msg) => write!(f, "invalid did: {}", msg),
-            Error::DidDocument(msg) => write!(f, "did document error: {}", msg),
-            Error::Resolution(msg) => write!(f, "did resolution error: {}", msg),
-            Error::Key(msg) => write!(f, "key error: {}", msg),
-            Error::Transport(msg) => write!(f, "transport error: {}", msg),
-            Error::Io(err) => write!(f, "io error: {}", err),
-            Error::Url(err) => write!(f, "url error: {}", err),
-            Error::Json(err) => write!(f, "json error: {}", err),
-            Error::Base58(err) => write!(f, "base58 error: {}", err),
-            Error::Utf8(err) => write!(f, "utf8 error: {}", err),
-            Error::AddrParse(err) => write!(f, "addr parse error: {}", err),
-        }
-    }
+#[derive(ThisError, Debug)]
+pub enum ResolveError {
+    #[error("invalid did {did}: {reason}")]
+    InvalidDid { did: String, reason: String },
+    #[error("invalid did document for {did}: {reason}")]
+    InvalidDocument { did: String, reason: String },
+    #[error("did document id mismatch for {did}: {found}")]
+    IdMismatch { did: String, found: String },
+    #[error("no suitable key for {did}")]
+    NoSuitableKey { did: String },
+    #[error("fetch failed for {did}: {reason}")]
+    FetchFailed { did: String, reason: String },
+    #[error("invalid server name for {did}: {reason}")]
+    InvalidServerName { did: String, reason: String },
 }
 
-impl std::error::Error for Error {}
+#[derive(ThisError, Debug)]
+pub enum TlsPeerError {
+    #[error("{reason}")]
+    Rejected { reason: String },
+}
+
+#[derive(ThisError, Debug)]
+pub enum NetworkError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("addr parse: {0}")]
+    AddrParse(#[from] std::net::AddrParseError),
+    #[error("url: {0}")]
+    Url(#[from] url::ParseError),
+    #[cfg(feature = "http")]
+    #[error("http: {0}")]
+    Http(#[from] hyper::Error),
+    #[cfg(feature = "http")]
+    #[error("http request: {0}")]
+    HttpRequest(#[from] hyper::http::Error),
+}
+
+pub type ResolveResult<T> = std::result::Result<T, ResolveError>;
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        Error::Io(err)
-    }
-}
-
-impl From<url::ParseError> for Error {
-    fn from(err: url::ParseError) -> Self {
-        Error::Url(err)
-    }
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(err: serde_json::Error) -> Self {
-        Error::Json(err)
-    }
-}
-
-impl From<bs58::decode::Error> for Error {
-    fn from(err: bs58::decode::Error) -> Self {
-        Error::Base58(err)
-    }
-}
-
-impl From<std::str::Utf8Error> for Error {
-    fn from(err: std::str::Utf8Error) -> Self {
-        Error::Utf8(err)
+        Error::Network(NetworkError::Io(err))
     }
 }
 
 impl From<std::net::AddrParseError> for Error {
     fn from(err: std::net::AddrParseError) -> Self {
-        Error::AddrParse(err)
+        Error::Network(NetworkError::AddrParse(err))
+    }
+}
+
+impl From<url::ParseError> for Error {
+    fn from(err: url::ParseError) -> Self {
+        Error::Network(NetworkError::Url(err))
     }
 }
 
 #[cfg(feature = "http")]
 impl From<hyper::Error> for Error {
     fn from(err: hyper::Error) -> Self {
-        Error::Transport(err.to_string())
+        Error::Network(NetworkError::Http(err))
     }
 }
 
 #[cfg(feature = "http")]
 impl From<hyper::http::Error> for Error {
     fn from(err: hyper::http::Error) -> Self {
-        Error::Transport(err.to_string())
+        Error::Network(NetworkError::HttpRequest(err))
     }
 }
 
@@ -144,7 +156,7 @@ impl Default for BootstrapConfig {
 }
 
 pub trait DidResolver: Send + Sync {
-    fn resolve(&self, did: &str) -> Result<Vec<Vec<u8>>>;
+    fn resolve(&self, did: &str) -> ResolveResult<Vec<Vec<u8>>>;
 }
 
 pub struct StaticResolver {
@@ -158,11 +170,11 @@ impl StaticResolver {
 }
 
 impl DidResolver for StaticResolver {
-    fn resolve(&self, did: &str) -> Result<Vec<Vec<u8>>> {
+    fn resolve(&self, did: &str) -> ResolveResult<Vec<Vec<u8>>> {
         self.keys
             .get(did)
             .cloned()
-            .ok_or_else(|| Error::Resolution(format!("no trusted keys for {}", did)))
+            .ok_or_else(|| ResolveError::NoSuitableKey { did: did.to_string() })
     }
 }
 
@@ -697,7 +709,15 @@ pub fn build_did_from_host(host: &str, port: Option<u16>) -> String {
 
 pub fn peer_from_did(did: &str) -> Result<Peer> {
     let (base_url, did_url) = did_web_to_urls(did)?;
-    let server_name = server_name_from_url(&base_url)?;
+    let server_name = server_name_from_url(&base_url).map_err(|err| match err {
+        Error::Resolution(ResolveError::InvalidServerName { reason, .. }) => {
+            Error::Resolution(ResolveError::InvalidServerName {
+                did: did.to_string(),
+                reason,
+            })
+        }
+        other => other,
+    })?;
     Ok(Peer {
         did: did.to_string(),
         base_url,
@@ -713,11 +733,18 @@ pub fn peer_from_did_url(did_url: &Url) -> Result<Peer> {
 
 pub fn did_web_from_url(url: &Url) -> Result<String> {
     if url.scheme() != "https" {
-        return Err(Error::InvalidDid("did:web URL must be https".to_string()));
+        return Err(ResolveError::InvalidDid {
+            did: url.as_str().to_string(),
+            reason: "did:web URL must be https".to_string(),
+        }
+        .into());
     }
     let host = url
         .host_str()
-        .ok_or_else(|| Error::InvalidDid("missing host".to_string()))?;
+        .ok_or_else(|| ResolveError::InvalidDid {
+            did: url.as_str().to_string(),
+            reason: "missing host".to_string(),
+        })?;
     let host_id = match url.port() {
         Some(port) => format!("{}%3A{}", host, port),
         None => host.to_string(),
@@ -738,16 +765,20 @@ pub fn did_web_from_url(url: &Url) -> Result<String> {
         let method_id = segments.join(":");
         return Ok(format!("{}{}:{}", DID_WEB_PREFIX, host_id, method_id));
     }
-    Err(Error::InvalidDid(
-        "did:web URL must end with /.well-known/did.json or /did.json".to_string(),
-    ))
+    Err(ResolveError::InvalidDid {
+        did: url.as_str().to_string(),
+        reason: "did:web URL must end with /.well-known/did.json or /did.json".to_string(),
+    }
+    .into())
 }
 
 pub fn did_web_to_urls(did: &str) -> Result<(Url, Url)> {
     if !did.starts_with(DID_WEB_PREFIX) {
-        return Err(Error::InvalidDid(
-            "unsupported DID (expected did:web)".to_string(),
-        ));
+        return Err(ResolveError::InvalidDid {
+            did: did.to_string(),
+            reason: "unsupported DID (expected did:web)".to_string(),
+        }
+        .into());
     }
     let method_id = &did[DID_WEB_PREFIX.len()..];
     let segments = method_id
@@ -756,11 +787,18 @@ pub fn did_web_to_urls(did: &str) -> Result<(Url, Url)> {
             percent_encoding::percent_decode_str(segment)
                 .decode_utf8()
                 .map(|value| value.to_string())
-                .map_err(Error::from)
+                .map_err(|err| ResolveError::InvalidDid {
+                    did: did.to_string(),
+                    reason: err.to_string(),
+                })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<ResolveResult<Vec<_>>>()?;
     if segments.is_empty() {
-        return Err(Error::InvalidDid("did:web missing host".to_string()));
+        return Err(ResolveError::InvalidDid {
+            did: did.to_string(),
+            reason: "did:web missing host".to_string(),
+        }
+        .into());
     }
     let host = &segments[0];
     let path_segments = &segments[1..];
@@ -776,15 +814,28 @@ pub fn did_web_to_urls(did: &str) -> Result<(Url, Url)> {
         format!("/{}/did.json", path_segments.join("/"))
     };
 
-    let base_url = Url::parse(&format!("https://{}{}", host, base_path))?;
-    let did_url = Url::parse(&format!("https://{}{}", host, did_path))?;
+    let base_url = Url::parse(&format!("https://{}{}", host, base_path))
+        .map_err(|err| ResolveError::InvalidDid {
+            did: did.to_string(),
+            reason: err.to_string(),
+        })?;
+    let did_url = Url::parse(&format!("https://{}{}", host, did_path))
+        .map_err(|err| ResolveError::InvalidDid {
+            did: did.to_string(),
+            reason: err.to_string(),
+        })?;
     Ok((base_url, did_url))
 }
 
 pub fn server_name_from_url(url: &Url) -> Result<ServerName<'static>> {
     let host = url
         .host_str()
-        .ok_or_else(|| Error::Resolution("missing host".to_string()))?;
+        .ok_or_else(|| {
+            ResolveError::InvalidServerName {
+                did: url.as_str().to_string(),
+                reason: "missing host".to_string(),
+            }
+        })?;
     server_name_from_host(host)
 }
 
@@ -793,7 +844,10 @@ pub fn server_name_from_host(host: &str) -> Result<ServerName<'static>> {
         Ok(ServerName::IpAddress(ip.into()))
     } else {
         Ok(ServerName::try_from(host.to_string())
-            .map_err(|_| Error::Resolution("invalid server name".to_string()))?)
+            .map_err(|_| ResolveError::InvalidServerName {
+                did: host.to_string(),
+                reason: "invalid server name".to_string(),
+            })?)
     }
 }
 
@@ -835,10 +889,20 @@ pub async fn send_request(
 ) -> Result<Response<Body>> {
     let host = url
         .host_str()
-        .ok_or_else(|| Error::Resolution("missing host".to_string()))?;
+        .ok_or_else(|| {
+            ResolveError::InvalidDid {
+                did: url.as_str().to_string(),
+                reason: "missing host".to_string(),
+            }
+        })?;
     let port = url
         .port_or_known_default()
-        .ok_or_else(|| Error::Resolution("missing port".to_string()))?;
+        .ok_or_else(|| {
+            ResolveError::InvalidDid {
+                did: url.as_str().to_string(),
+                reason: "missing port".to_string(),
+            }
+        })?;
     let addr = match connect_addr {
         Some(addr) => addr,
         None => format!("{}:{}", host, port).parse()?,
@@ -851,7 +915,10 @@ pub async fn send_request(
 
     let tcp = TcpStream::connect(addr).await?;
     let connector = TlsConnector::from(client_config);
-    let tls_stream = connector.connect(server_name, tcp).await?;
+    let tls_stream = connector
+        .connect(server_name, tcp)
+        .await
+        .map_err(map_tls_io_error)?;
 
     let (mut sender, connection) = hyper::client::conn::Builder::new()
         .http2_only(true)
@@ -901,7 +968,7 @@ pub async fn fetch_peer_keys_with_config(
     config: BootstrapConfig,
     expected_did: &str,
 ) -> Result<Vec<Vec<u8>>> {
-    let mut last_err: Option<Error> = None;
+    let mut last_err: Option<ResolveError> = None;
 
     for attempt in 1..=config.retries {
         eprintln!(
@@ -921,15 +988,24 @@ pub async fn fetch_peer_keys_with_config(
             Ok(response) => {
                 if response.status() == StatusCode::OK {
                     let bytes = to_bytes(response.into_body()).await?;
-                    let doc: serde_json::Value = serde_json::from_slice(bytes.as_ref())?;
+                    let doc: serde_json::Value = serde_json::from_slice(bytes.as_ref())
+                        .map_err(|err| ResolveError::InvalidDocument {
+                            did: expected_did.to_string(),
+                            reason: err.to_string(),
+                        })?;
                     return extract_keys_from_did(&doc, expected_did);
                 }
-                last_err = Some(Error::Resolution(format!(
-                    "did.json fetch failed: {}",
-                    response.status()
-                )));
+                last_err = Some(ResolveError::FetchFailed {
+                    did: expected_did.to_string(),
+                    reason: format!("did.json fetch failed: {}", response.status()),
+                });
             }
-            Err(err) => last_err = Some(err),
+            Err(err) => {
+                last_err = Some(ResolveError::FetchFailed {
+                    did: expected_did.to_string(),
+                    reason: err.to_string(),
+                })
+            }
         }
 
         if attempt < config.retries {
@@ -943,27 +1019,36 @@ pub async fn fetch_peer_keys_with_config(
         }
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        Error::Resolution("did.json fetch failed".to_string())
-    }))
+    Err(last_err.unwrap_or_else(|| ResolveError::FetchFailed {
+        did: expected_did.to_string(),
+        reason: "did.json fetch failed".to_string(),
+    })
+    .into())
 }
 
 fn extract_keys_from_did(doc: &serde_json::Value, expected_did: &str) -> Result<Vec<Vec<u8>>> {
     let doc_id = doc
         .get("id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::DidDocument("did.json missing id".to_string()))?;
+        .ok_or_else(|| ResolveError::InvalidDocument {
+            did: expected_did.to_string(),
+            reason: "did.json missing id".to_string(),
+        })?;
     if doc_id != expected_did {
-        return Err(Error::DidDocument(format!(
-            "did.json id mismatch (expected {} got {})",
-            expected_did, doc_id
-        )));
+        return Err(ResolveError::IdMismatch {
+            did: expected_did.to_string(),
+            found: doc_id.to_string(),
+        }
+        .into());
     }
 
     let methods = doc
         .get("verificationMethod")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| Error::DidDocument("did.json missing verificationMethod".to_string()))?;
+        .ok_or_else(|| ResolveError::InvalidDocument {
+            did: expected_did.to_string(),
+            reason: "did.json missing verificationMethod".to_string(),
+        })?;
 
     let mut keys = Vec::new();
     for method in methods {
@@ -976,15 +1061,26 @@ fn extract_keys_from_did(doc: &serde_json::Value, expected_did: &str) -> Result<
             Some(value) => value,
             None => continue,
         };
-        let raw = decode_multibase_ed25519(multibase)?;
-        let spki = spki_from_raw_pubkey(&raw)?;
+        let raw = decode_multibase_ed25519(multibase).map_err(|err| {
+            ResolveError::InvalidDocument {
+                did: expected_did.to_string(),
+                reason: err,
+            }
+        })?;
+        let spki = spki_from_raw_pubkey(&raw).map_err(|err| {
+            ResolveError::InvalidDocument {
+                did: expected_did.to_string(),
+                reason: err,
+            }
+        })?;
         keys.push(spki);
     }
 
     if keys.is_empty() {
-        return Err(Error::DidDocument(
-            "no Ed25519 publicKeyMultibase keys found in did.json".to_string(),
-        ));
+        return Err(ResolveError::NoSuitableKey {
+            did: expected_did.to_string(),
+        }
+        .into());
     }
     Ok(keys)
 }
@@ -996,19 +1092,19 @@ fn generate_identity() -> Result<Identity> {
 
     let spki = verifying_key
         .to_public_key_der()
-        .map_err(|e| Error::Key(e.to_string()))?
+        .map_err(|e| IdentityError::Key(e.to_string()))?
         .as_bytes()
         .to_vec();
     let cert_chain = vec![CertificateDer::from(spki)];
 
     let pkcs8 = signing_key
         .to_pkcs8_der()
-        .map_err(|e| Error::Key(e.to_string()))?;
+        .map_err(|e| IdentityError::Key(e.to_string()))?;
     let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
         pkcs8.as_bytes().to_vec(),
     ));
     let signing_key =
-        any_supported_type(&private_key).map_err(|e| Error::Key(e.to_string()))?;
+        any_supported_type(&private_key).map_err(|e| IdentityError::Key(e.to_string()))?;
 
     let certified_key = Arc::new(CertifiedKey::new(cert_chain, signing_key));
 
@@ -1035,25 +1131,26 @@ fn build_did_json(did: &str, public_key: &[u8]) -> Result<String> {
         "authentication": [format!("{}#key-1", did)],
         "assertionMethod": [format!("{}#key-1", did)],
     });
-    Ok(serde_json::to_string_pretty(&doc)?)
+    Ok(serde_json::to_string_pretty(&doc)
+        .map_err(|err| IdentityError::Document(err.to_string()))?)
 }
 
-fn spki_from_raw_pubkey(raw: &[u8]) -> Result<Vec<u8>> {
+fn spki_from_raw_pubkey(raw: &[u8]) -> std::result::Result<Vec<u8>, String> {
     let raw: [u8; 32] = raw
         .try_into()
-        .map_err(|_| Error::Key("invalid Ed25519 public key length".to_string()))?;
+        .map_err(|_| "invalid Ed25519 public key length".to_string())?;
     let verifying_key =
-        VerifyingKey::from_bytes(&raw).map_err(|e| Error::Key(e.to_string()))?;
+        VerifyingKey::from_bytes(&raw).map_err(|e| e.to_string())?;
     Ok(verifying_key
         .to_public_key_der()
-        .map_err(|e| Error::Key(e.to_string()))?
+        .map_err(|e| e.to_string())?
         .as_bytes()
         .to_vec())
 }
 
 fn encode_multibase_ed25519(public_key: &[u8]) -> Result<String> {
     if public_key.len() != 32 {
-        return Err(Error::Key("invalid Ed25519 public key length".to_string()));
+        return Err(IdentityError::Key("invalid Ed25519 public key length".to_string()).into());
     }
     let mut bytes = Vec::with_capacity(ED25519_PUBKEY_MULTICODEC.len() + public_key.len());
     bytes.extend_from_slice(&ED25519_PUBKEY_MULTICODEC);
@@ -1061,18 +1158,18 @@ fn encode_multibase_ed25519(public_key: &[u8]) -> Result<String> {
     Ok(format!("z{}", bs58::encode(bytes).into_string()))
 }
 
-fn decode_multibase_ed25519(value: &str) -> Result<Vec<u8>> {
+fn decode_multibase_ed25519(value: &str) -> std::result::Result<Vec<u8>, String> {
     let encoded = value
         .strip_prefix('z')
-        .ok_or_else(|| Error::Key("unsupported multibase prefix".to_string()))?;
-    let bytes = bs58::decode(encoded).into_vec()?;
+        .ok_or_else(|| "unsupported multibase prefix".to_string())?;
+    let bytes = bs58::decode(encoded)
+        .into_vec()
+        .map_err(|e| e.to_string())?;
     if bytes.len() != ED25519_PUBKEY_MULTICODEC.len() + 32 {
-        return Err(Error::Key(
-            "invalid multibase Ed25519 key length".to_string(),
-        ));
+        return Err("invalid multibase Ed25519 key length".to_string());
     }
     if bytes[..ED25519_PUBKEY_MULTICODEC.len()] != ED25519_PUBKEY_MULTICODEC {
-        return Err(Error::Key("unexpected multicodec prefix".to_string()));
+        return Err("unexpected multicodec prefix".to_string());
     }
     Ok(bytes[ED25519_PUBKEY_MULTICODEC.len()..].to_vec())
 }
@@ -1089,6 +1186,18 @@ fn short_hex(bytes: &[u8]) -> String {
         .map(|b| format!("{:02x}", b))
         .collect::<Vec<_>>()
         .join("")
+}
+
+#[cfg(feature = "http")]
+fn map_tls_io_error(err: std::io::Error) -> Error {
+    if let Some(source) = err.get_ref() {
+        if source.is::<rustls::Error>() {
+            return Error::TlsPeerRejected(TlsPeerError::Rejected {
+                reason: source.to_string(),
+            });
+        }
+    }
+    Error::Network(NetworkError::Io(err))
 }
 
 #[cfg(test)]

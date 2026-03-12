@@ -12,7 +12,7 @@ use url::Url;
 
 use did_web_rpk_tls::{
     build_did_from_host, peer_from_did, peer_from_did_url, send_request, BootstrapConfig, Dialer,
-    Error, Node, Peer, Result,
+    Error, IdentityError, Node, Peer, Result,
 };
 
 #[derive(Parser, Debug)]
@@ -70,9 +70,9 @@ async fn main() -> Result<()> {
         }
         (None, Some(did)) => did,
         (None, None) => {
-            return Err(Error::InvalidDid(
+            return Err(Error::Identity(did_web_rpk_tls::IdentityError::Missing(
                 "missing --did or --did-host".to_string(),
-            ))
+            )))
         }
     };
 
@@ -130,7 +130,11 @@ async fn main() -> Result<()> {
         });
     }
 
-    server_task.await.map_err(|e| did_web_rpk_tls::Error::Transport(e.to_string()))?;
+    server_task.await.map_err(|e| {
+        did_web_rpk_tls::Error::Network(did_web_rpk_tls::NetworkError::Io(
+            std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+        ))
+    })?;
     Ok(())
 }
 
@@ -162,7 +166,10 @@ async fn run_server(
     }
 }
 
-async fn handle(req: Request<Body>, state: Arc<AppState>) -> Result<Response<Body>> {
+async fn handle(
+    req: Request<Body>,
+    state: Arc<AppState>,
+) -> std::result::Result<Response<Body>, hyper::Error> {
     let response = match (req.method(), req.uri().path()) {
         (&Method::GET, "/.well-known/did.json") => Response::builder()
             .status(StatusCode::OK)
@@ -235,10 +242,14 @@ fn build_peer_config(args: &Args) -> Result<Option<PeerConfig>> {
         peer_from_did_url(&did_url)?
     } else {
         let peer_host = args.peer_host.as_deref().ok_or_else(|| {
-            Error::Resolution("missing --peer-host for derived peer".to_string())
+            Error::Identity(IdentityError::Missing(
+                "missing --peer-host for derived peer".to_string(),
+            ))
         })?;
         let addr: SocketAddr = connect_addr.ok_or_else(|| {
-            Error::Resolution("missing --peer-addr for derived peer url".to_string())
+            Error::Identity(IdentityError::Missing(
+                "missing --peer-addr for derived peer url".to_string(),
+            ))
         })?;
         let did = build_did_from_host(peer_host, Some(addr.port()));
         peer_from_did(&did)?

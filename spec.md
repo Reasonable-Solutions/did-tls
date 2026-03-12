@@ -26,6 +26,10 @@ This crate is intended for service-to-service use in controlled environments (e.
 ### 4.1 Primary types
 
 ```
+pub enum Error { /* structured error variants */ }
+
+pub type Result<T> = std::result::Result<T, Error>;
+
 pub struct Node {
     pub did: String,
     pub did_json: Arc<String>,
@@ -56,37 +60,37 @@ pub struct Peer {
 
 ```
 impl Node {
-    pub fn new(did: impl Into<String>) -> Result<Self, BoxError>;
+    pub fn new(did: impl Into<String>) -> Result<Self, Error>;
     pub fn new_with_trusted_keys(did: impl Into<String>, trusted_keys: HashMap<String, Vec<Vec<u8>>>)
-        -> Result<Self, BoxError>;
-    pub fn local_public_key_multibase(&self) -> Result<String, BoxError>;
+        -> Result<Self, Error>;
+    pub fn local_public_key_multibase(&self) -> Result<String, Error>;
     pub fn set_trusted_keys(&self, peer_did: impl Into<String>, keys: Vec<Vec<u8>>);
     pub fn add_trusted_key(&self, peer_did: impl Into<String>, key: Vec<u8>);
-    pub fn listen(&self) -> Result<Listener, BoxError>;
+    pub fn listen(&self) -> Result<Listener, Error>;
     pub fn dial_with_resolver(&self, peer_did: &str, resolver: &dyn DidResolver)
-        -> Result<Dialer, BoxError>;
+        -> Result<Dialer, Error>;
     pub fn dial_with_resolver_addr(&self, peer_did: &str, connect_addr: Option<SocketAddr>, resolver: &dyn DidResolver)
-        -> Result<Dialer, BoxError>;
+        -> Result<Dialer, Error>;
     pub async fn dial(&self, peer_did: &str)
-        -> Result<Dialer, BoxError>;
+        -> Result<Dialer, Error>;
     pub async fn dial_with_config(&self, peer_did: &str, config: BootstrapConfig)
-        -> Result<Dialer, BoxError>;
+        -> Result<Dialer, Error>;
     pub async fn dial_with_addr(&self, peer_did: &str, connect_addr: SocketAddr)
-        -> Result<Dialer, BoxError>;
+        -> Result<Dialer, Error>;
     pub async fn dial_with_addr_config(&self, peer_did: &str, connect_addr: SocketAddr, config: BootstrapConfig)
-        -> Result<Dialer, BoxError>;
+        -> Result<Dialer, Error>;
     pub async fn dial_with_peer(&self, peer: Peer)
-        -> Result<Dialer, BoxError>;
+        -> Result<Dialer, Error>;
     pub async fn dial_with_peer_config(&self, peer: Peer, config: BootstrapConfig)
-        -> Result<Dialer, BoxError>;
+        -> Result<Dialer, Error>;
     pub async fn dial_with_peer_addr(&self, peer: Peer, connect_addr: SocketAddr)
-        -> Result<Dialer, BoxError>;
+        -> Result<Dialer, Error>;
     pub async fn dial_with_peer_addr_config(&self, peer: Peer, connect_addr: SocketAddr, config: BootstrapConfig)
-        -> Result<Dialer, BoxError>;
+        -> Result<Dialer, Error>;
     pub fn dial_with_keys(&self, peer: Peer, peer_keys: Vec<Vec<u8>>)
-        -> Result<Dialer, BoxError>;
+        -> Result<Dialer, Error>;
     pub fn dial_with_keys_addr(&self, peer: Peer, connect_addr: SocketAddr, peer_keys: Vec<Vec<u8>>)
-        -> Result<Dialer, BoxError>;
+        -> Result<Dialer, Error>;
     pub fn trusted_keys(&self) -> Arc<RwLock<HashMap<String, Vec<Vec<u8>>>>>;
 }
 ```
@@ -96,15 +100,15 @@ impl Node {
 ```
 pub fn build_did_from_host(host: &str, port: Option<u16>) -> String;
 
-pub fn peer_from_did(did: &str) -> Result<Peer, BoxError>;
+pub fn peer_from_did(did: &str) -> Result<Peer, Error>;
 
-pub fn peer_from_did_url(did_url: &Url) -> Result<Peer, BoxError>;
+pub fn peer_from_did_url(did_url: &Url) -> Result<Peer, Error>;
 
-pub fn did_web_to_urls(did: &str) -> Result<(Url, Url), BoxError>;
+pub fn did_web_to_urls(did: &str) -> Result<(Url, Url), Error>;
 
-pub fn did_web_from_url(url: &Url) -> Result<String, BoxError>;
+pub fn did_web_from_url(url: &Url) -> Result<String, Error>;
 
-pub fn server_name_from_host(host: &str) -> Result<ServerName<'static>, BoxError>;
+pub fn server_name_from_host(host: &str) -> Result<ServerName<'static>, Error>;
 ```
 
 ### 4.4 HTTP helper
@@ -117,7 +121,7 @@ pub async fn send_request(
     body: Option<Body>,
     connect_addr: Option<SocketAddr>,
     server_name: Option<ServerName<'static>>,
-) -> Result<Response<Body>, BoxError>;
+) -> Result<Response<Body>, Error>;
 
 pub struct BootstrapConfig {
     pub retries: usize,
@@ -131,7 +135,7 @@ pub async fn fetch_peer_keys_with_config(
     server_name: ServerName<'static>,
     config: BootstrapConfig,
     expected_did: &str,
-) -> Result<Vec<Vec<u8>>, BoxError>;
+) -> Result<Vec<Vec<u8>>, Error>;
 ```
 
 ### 4.5 Features
@@ -145,7 +149,7 @@ pub async fn fetch_peer_keys_with_config(
 
 ```
 pub trait DidResolver: Send + Sync {
-    fn resolve(&self, did: &str) -> Result<Vec<Vec<u8>>, BoxError>;
+    fn resolve(&self, did: &str) -> Result<Vec<Vec<u8>>, Error>;
 }
 
 pub struct StaticResolver { /* map of did -> keys */ }
@@ -214,7 +218,7 @@ Implement custom verifiers:
 - Future: a cache TTL or background refresh policy for peer keys.
 
 ## 8. Error behavior
-- All public APIs return `BoxError` for easy integration.
+- All public APIs return `Result<T>` with a structured `Error`.
 - Error messages should be stable and human-readable (useful in logs).
 - Verification failures should identify the SPKI length and a short suffix to assist debugging.
 

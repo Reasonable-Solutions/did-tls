@@ -33,6 +33,9 @@ identity vs transport).
 Trusted keys are stored per peer DID, so a key for one peer cannot authenticate
 as another.
 
+Public APIs return a structured `Error` type (with a `Result<T>` alias) rather
+than `Box<dyn Error>`.
+
 Feature flags:
 - `http` (default): enables DID resolution and `Node::dial*` helpers.
 - `--no-default-features`: opt out of HTTP resolution and use `dial_with_keys*`.

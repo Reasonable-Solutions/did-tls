@@ -11,8 +11,8 @@ use tokio::time::sleep;
 use url::Url;
 
 use did_web_rpk_tls::{
-    build_did_from_host, peer_from_did, peer_from_did_url, send_request, BoxError, BootstrapConfig,
-    Dialer, Node, Peer,
+    build_did_from_host, peer_from_did, peer_from_did_url, send_request, BootstrapConfig, Dialer,
+    Error, Node, Peer, Result,
 };
 
 #[derive(Parser, Debug)]
@@ -57,7 +57,7 @@ struct PeerConfig {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), BoxError> {
+async fn main() -> Result<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let args = Args::parse();
 
@@ -69,7 +69,11 @@ async fn main() -> Result<(), BoxError> {
             build_did_from_host(host, args.did_port)
         }
         (None, Some(did)) => did,
-        (None, None) => return Err("missing --did or --did-host".into()),
+        (None, None) => {
+            return Err(Error::InvalidDid(
+                "missing --did or --did-host".to_string(),
+            ))
+        }
     };
 
     let node = Node::new(did)?;
@@ -126,7 +130,7 @@ async fn main() -> Result<(), BoxError> {
         });
     }
 
-    server_task.await.map_err(|e| -> BoxError { e.into() })?;
+    server_task.await.map_err(|e| did_web_rpk_tls::Error::Transport(e.to_string()))?;
     Ok(())
 }
 
@@ -134,7 +138,7 @@ async fn run_server(
     addr: SocketAddr,
     acceptor: tokio_rustls::TlsAcceptor,
     state: Arc<AppState>,
-) -> Result<(), BoxError> {
+) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     loop {
         let (stream, _) = listener.accept().await?;
@@ -158,7 +162,7 @@ async fn run_server(
     }
 }
 
-async fn handle(req: Request<Body>, state: Arc<AppState>) -> Result<Response<Body>, hyper::Error> {
+async fn handle(req: Request<Body>, state: Arc<AppState>) -> Result<Response<Body>> {
     let response = match (req.method(), req.uri().path()) {
         (&Method::GET, "/.well-known/did.json") => Response::builder()
             .status(StatusCode::OK)
@@ -183,7 +187,7 @@ async fn handle(req: Request<Body>, state: Arc<AppState>) -> Result<Response<Bod
     Ok(response)
 }
 
-async fn ping_loop(dialer: Dialer, interval: Duration) -> Result<(), BoxError> {
+async fn ping_loop(dialer: Dialer, interval: Duration) -> Result<()> {
     loop {
         let url = dialer.peer.base_url.join("ping")?;
         let body = Body::from("ping");
@@ -202,7 +206,7 @@ async fn ping_loop(dialer: Dialer, interval: Duration) -> Result<(), BoxError> {
     }
 }
 
-fn build_peer_config(args: &Args) -> Result<Option<PeerConfig>, BoxError> {
+fn build_peer_config(args: &Args) -> Result<Option<PeerConfig>> {
     if args.peer_did.is_none()
         && args.peer_url.is_none()
         && args.peer_did_url.is_none()
@@ -230,12 +234,12 @@ fn build_peer_config(args: &Args) -> Result<Option<PeerConfig>, BoxError> {
         let did_url = did_url_from_base_url(peer_url)?;
         peer_from_did_url(&did_url)?
     } else {
-        let peer_host = args
-            .peer_host
-            .as_deref()
-            .ok_or("missing --peer-host for derived peer")?;
-        let addr: SocketAddr =
-            connect_addr.ok_or("missing --peer-addr for derived peer url")?;
+        let peer_host = args.peer_host.as_deref().ok_or_else(|| {
+            Error::Resolution("missing --peer-host for derived peer".to_string())
+        })?;
+        let addr: SocketAddr = connect_addr.ok_or_else(|| {
+            Error::Resolution("missing --peer-addr for derived peer url".to_string())
+        })?;
         let did = build_did_from_host(peer_host, Some(addr.port()));
         peer_from_did(&did)?
     };
@@ -247,7 +251,7 @@ fn build_peer_config(args: &Args) -> Result<Option<PeerConfig>, BoxError> {
     Ok(Some(PeerConfig { peer, connect_addr }))
 }
 
-fn did_url_from_base_url(base_url: &Url) -> Result<Url, BoxError> {
+fn did_url_from_base_url(base_url: &Url) -> Result<Url> {
     let mut url = base_url.clone();
     let path = url.path().trim_end_matches('/');
     if path.is_empty() {

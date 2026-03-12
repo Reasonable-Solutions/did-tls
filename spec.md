@@ -57,12 +57,16 @@ pub struct Peer {
 ```
 impl Node {
     pub fn new(did: impl Into<String>) -> Result<Self, BoxError>;
-    pub fn new_with_trusted_keys(did: impl Into<String>, trusted_keys: Vec<Vec<u8>>)
+    pub fn new_with_trusted_keys(did: impl Into<String>, trusted_keys: HashMap<String, Vec<Vec<u8>>>)
         -> Result<Self, BoxError>;
     pub fn local_public_key_multibase(&self) -> Result<String, BoxError>;
-    pub fn set_trusted_keys(&self, keys: Vec<Vec<u8>>);
-    pub fn add_trusted_key(&self, key: Vec<u8>);
+    pub fn set_trusted_keys(&self, peer_did: impl Into<String>, keys: Vec<Vec<u8>>);
+    pub fn add_trusted_key(&self, peer_did: impl Into<String>, key: Vec<u8>);
     pub fn listen(&self) -> Result<Listener, BoxError>;
+    pub fn dial_with_resolver(&self, peer_did: &str, resolver: &dyn DidResolver)
+        -> Result<Dialer, BoxError>;
+    pub fn dial_with_resolver_addr(&self, peer_did: &str, connect_addr: Option<SocketAddr>, resolver: &dyn DidResolver)
+        -> Result<Dialer, BoxError>;
     pub async fn dial(&self, peer_did: &str)
         -> Result<Dialer, BoxError>;
     pub async fn dial_with_config(&self, peer_did: &str, config: BootstrapConfig)
@@ -83,7 +87,7 @@ impl Node {
         -> Result<Dialer, BoxError>;
     pub fn dial_with_keys_addr(&self, peer: Peer, connect_addr: SocketAddr, peer_keys: Vec<Vec<u8>>)
         -> Result<Dialer, BoxError>;
-    pub fn trusted_keys(&self) -> Arc<RwLock<Vec<Vec<u8>>>>;
+    pub fn trusted_keys(&self) -> Arc<RwLock<HashMap<String, Vec<Vec<u8>>>>>;
 }
 ```
 
@@ -126,7 +130,25 @@ pub async fn fetch_peer_keys_with_config(
     connect_addr: Option<SocketAddr>,
     server_name: ServerName<'static>,
     config: BootstrapConfig,
+    expected_did: &str,
 ) -> Result<Vec<Vec<u8>>, BoxError>;
+```
+
+### 4.5 Features
+
+- `default = ["http"]`
+- `http`: enables DID resolution helpers and `Node::dial*` methods that perform
+  HTTP fetches for `did.json`. Without this feature, callers should use
+  `dial_with_keys*` and supply a trusted key set out of band.
+
+### 4.6 Resolver trait
+
+```
+pub trait DidResolver: Send + Sync {
+    fn resolve(&self, did: &str) -> Result<Vec<Vec<u8>>, BoxError>;
+}
+
+pub struct StaticResolver { /* map of did -> keys */ }
 ```
 
 ## 5. Behavior and flows
@@ -157,6 +179,8 @@ pub async fn fetch_peer_keys_with_config(
 - The resolver looks for `verificationMethod[].publicKeyMultibase`.
 - Only Ed25519 keys are accepted.
 - The multibase string is decoded into a 32-byte Ed25519 key, then wrapped into SPKI DER for rustls.
+- The DID document `id` must match the expected DID.
+- If `verificationMethod[].controller` is present and does not match the expected DID, that entry is ignored.
 - If no valid keys exist, resolution fails.
 
 ### 5.5 Trust model
@@ -165,7 +189,8 @@ pub async fn fetch_peer_keys_with_config(
   - Subsequent handshakes require key match.
 - Pinned trust is supported:
   - The caller can pre-populate `trusted_keys` or use `dial_with_keys` to skip TOFU.
-  - The trust store is a shared `RwLock<Vec<Vec<u8>>>` of SPKI DER keys.
+  - The trust store is a shared `RwLock<HashMap<String, Vec<Vec<u8>>>>` keyed by peer DID.
+  - Client-side verification only accepts keys for the expected peer DID.
 
 ## 6. Rustls integration
 

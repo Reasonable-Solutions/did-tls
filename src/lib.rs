@@ -1,7 +1,9 @@
 use bs58;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use ed25519_dalek::{SigningKey, VerifyingKey};
+#[cfg(feature = "http")]
 use hyper::body::to_bytes;
+#[cfg(feature = "http")]
 use hyper::{Body, Method, Request, Response, StatusCode};
 use rand_core::OsRng;
 use rustls::client::AlwaysResolvesClientRawPublicKeys;
@@ -17,12 +19,17 @@ use rustls::{
 use rustls::crypto::aws_lc_rs::sign::any_supported_type;
 use rustls::sign::CertifiedKey;
 use serde_json::json;
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+#[cfg(feature = "http")]
 use tokio::net::TcpStream;
+#[cfg(feature = "http")]
 use tokio::time::sleep;
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_rustls::TlsAcceptor;
+#[cfg(feature = "http")]
+use tokio_rustls::TlsConnector;
 use url::Url;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -46,6 +53,29 @@ impl Default for BootstrapConfig {
             retries: BOOTSTRAP_RETRIES,
             delay: Duration::from_secs(BOOTSTRAP_DELAY_SECS),
         }
+    }
+}
+
+pub trait DidResolver: Send + Sync {
+    fn resolve(&self, did: &str) -> Result<Vec<Vec<u8>>, BoxError>;
+}
+
+pub struct StaticResolver {
+    keys: HashMap<String, Vec<Vec<u8>>>,
+}
+
+impl StaticResolver {
+    pub fn new(keys: HashMap<String, Vec<Vec<u8>>>) -> Self {
+        Self { keys }
+    }
+}
+
+impl DidResolver for StaticResolver {
+    fn resolve(&self, did: &str) -> Result<Vec<Vec<u8>>, BoxError> {
+        self.keys
+            .get(did)
+            .cloned()
+            .ok_or_else(|| format!("no trusted keys for {}", did).into())
     }
 }
 
@@ -82,17 +112,17 @@ pub struct Node {
     pub did: String,
     pub did_json: Arc<String>,
     identity: Identity,
-    trusted_keys: Arc<RwLock<Vec<Vec<u8>>>>,
+    trusted_keys: Arc<RwLock<HashMap<String, Vec<Vec<u8>>>>>,
 }
 
 impl Node {
     pub fn new(did: impl Into<String>) -> Result<Self, BoxError> {
-        Self::new_with_trusted_keys(did, Vec::new())
+        Self::new_with_trusted_keys(did, HashMap::new())
     }
 
     pub fn new_with_trusted_keys(
         did: impl Into<String>,
-        trusted_keys: Vec<Vec<u8>>,
+        trusted_keys: HashMap<String, Vec<Vec<u8>>>,
     ) -> Result<Self, BoxError> {
         let did = did.into();
         let identity = generate_identity()?;
@@ -109,14 +139,14 @@ impl Node {
         encode_multibase_ed25519(&self.identity.public_key)
     }
 
-    pub fn set_trusted_keys(&self, keys: Vec<Vec<u8>>) {
+    pub fn set_trusted_keys(&self, peer_did: impl Into<String>, keys: Vec<Vec<u8>>) {
         let mut guard = self.trusted_keys.write().unwrap();
-        *guard = keys;
+        guard.insert(peer_did.into(), keys);
     }
 
-    pub fn add_trusted_key(&self, key: Vec<u8>) {
+    pub fn add_trusted_key(&self, peer_did: impl Into<String>, key: Vec<u8>) {
         let mut guard = self.trusted_keys.write().unwrap();
-        guard.push(key);
+        guard.entry(peer_did.into()).or_default().push(key);
     }
 
     pub fn listen(&self) -> Result<Listener, BoxError> {
@@ -133,11 +163,33 @@ impl Node {
         })
     }
 
+    #[cfg(feature = "http")]
+    pub fn dial_with_resolver(
+        &self,
+        peer_did: &str,
+        resolver: &dyn DidResolver,
+    ) -> Result<Dialer, BoxError> {
+        self.dial_with_resolver_addr(peer_did, None, resolver)
+    }
+
+    pub fn dial_with_resolver_addr(
+        &self,
+        peer_did: &str,
+        connect_addr: Option<SocketAddr>,
+        resolver: &dyn DidResolver,
+    ) -> Result<Dialer, BoxError> {
+        let peer = peer_from_did(peer_did)?;
+        let keys = resolver.resolve(peer_did)?;
+        self.dial_with_peer_keys_addr(peer, connect_addr, keys)
+    }
+
+    #[cfg(feature = "http")]
     pub async fn dial(&self, peer_did: &str) -> Result<Dialer, BoxError> {
         self.dial_with_config(peer_did, BootstrapConfig::default())
             .await
     }
 
+    #[cfg(feature = "http")]
     pub async fn dial_with_config(
         &self,
         peer_did: &str,
@@ -147,6 +199,7 @@ impl Node {
         self.dial_with_peer_config(peer, config).await
     }
 
+    #[cfg(feature = "http")]
     pub async fn dial_with_addr(
         &self,
         peer_did: &str,
@@ -156,6 +209,7 @@ impl Node {
             .await
     }
 
+    #[cfg(feature = "http")]
     pub async fn dial_with_addr_config(
         &self,
         peer_did: &str,
@@ -167,11 +221,13 @@ impl Node {
             .await
     }
 
+    #[cfg(feature = "http")]
     pub async fn dial_with_peer(&self, peer: Peer) -> Result<Dialer, BoxError> {
         self.dial_with_peer_config(peer, BootstrapConfig::default())
             .await
     }
 
+    #[cfg(feature = "http")]
     pub async fn dial_with_peer_config(
         &self,
         peer: Peer,
@@ -180,6 +236,7 @@ impl Node {
         self.dial_with_peer_addr_config_inner(peer, None, config).await
     }
 
+    #[cfg(feature = "http")]
     pub async fn dial_with_peer_addr(
         &self,
         peer: Peer,
@@ -189,6 +246,7 @@ impl Node {
             .await
     }
 
+    #[cfg(feature = "http")]
     pub async fn dial_with_peer_addr_config(
         &self,
         peer: Peer,
@@ -199,6 +257,7 @@ impl Node {
             .await
     }
 
+    #[cfg(feature = "http")]
     async fn dial_with_peer_addr_config_inner(
         &self,
         peer: Peer,
@@ -216,24 +275,10 @@ impl Node {
             connect_addr,
             peer.server_name.clone(),
             config,
+            &peer.did,
         )
         .await?;
-        {
-            let mut guard = self.trusted_keys.write().unwrap();
-            *guard = keys.clone();
-        }
-        let verifier = Arc::new(PubkeyVerifier::new(self.trusted_keys.clone(), false));
-        let client_config = build_client_config(
-            self.identity.certified_key.clone(),
-            verifier,
-            vec![ALPN_H2.to_vec()],
-        )?;
-        Ok(Dialer {
-            client_config: Arc::new(client_config),
-            peer,
-            connect_addr,
-            peer_keys: keys,
-        })
+        self.dial_with_peer_keys_addr(peer, connect_addr, keys)
     }
 
     pub fn dial_with_keys(
@@ -241,7 +286,7 @@ impl Node {
         peer: Peer,
         peer_keys: Vec<Vec<u8>>,
     ) -> Result<Dialer, BoxError> {
-        self.dial_with_keys_addr_inner(peer, None, peer_keys)
+        self.dial_with_peer_keys_addr(peer, None, peer_keys)
     }
 
     pub fn dial_with_keys_addr(
@@ -250,10 +295,10 @@ impl Node {
         connect_addr: SocketAddr,
         peer_keys: Vec<Vec<u8>>,
     ) -> Result<Dialer, BoxError> {
-        self.dial_with_keys_addr_inner(peer, Some(connect_addr), peer_keys)
+        self.dial_with_peer_keys_addr(peer, Some(connect_addr), peer_keys)
     }
 
-    fn dial_with_keys_addr_inner(
+    fn dial_with_peer_keys_addr(
         &self,
         peer: Peer,
         connect_addr: Option<SocketAddr>,
@@ -261,9 +306,9 @@ impl Node {
     ) -> Result<Dialer, BoxError> {
         {
             let mut guard = self.trusted_keys.write().unwrap();
-            *guard = peer_keys.clone();
+            guard.insert(peer.did.clone(), peer_keys.clone());
         }
-        let verifier = Arc::new(PubkeyVerifier::new(self.trusted_keys.clone(), false));
+        let verifier = Arc::new(PeerVerifier::new(self.trusted_keys.clone(), peer.did.clone()));
         let client_config = build_client_config(
             self.identity.certified_key.clone(),
             verifier,
@@ -277,19 +322,19 @@ impl Node {
         })
     }
 
-    pub fn trusted_keys(&self) -> Arc<RwLock<Vec<Vec<u8>>>> {
+    pub fn trusted_keys(&self) -> Arc<RwLock<HashMap<String, Vec<Vec<u8>>>>> {
         self.trusted_keys.clone()
     }
 }
 
 #[derive(Debug)]
 pub struct PubkeyVerifier {
-    allowed_keys: Arc<RwLock<Vec<Vec<u8>>>>,
+    allowed_keys: Arc<RwLock<HashMap<String, Vec<Vec<u8>>>>>,
     allow_if_empty: bool,
 }
 
 impl PubkeyVerifier {
-    pub fn new(allowed_keys: Arc<RwLock<Vec<Vec<u8>>>>, allow_if_empty: bool) -> Self {
+    pub fn new(allowed_keys: Arc<RwLock<HashMap<String, Vec<Vec<u8>>>>>, allow_if_empty: bool) -> Self {
         Self {
             allowed_keys,
             allow_if_empty,
@@ -307,7 +352,10 @@ impl PubkeyVerifier {
             );
             return Ok(());
         }
-        if allowed.iter().any(|k| k.as_slice() == key) {
+        if allowed
+            .values()
+            .any(|keys| keys.iter().any(|k| k.as_slice() == key))
+        {
             eprintln!(
                 "rpk verify: allow spki_len={} spki_suffix={}",
                 key.len(),
@@ -319,13 +367,13 @@ impl PubkeyVerifier {
                 "rpk verify: deny spki_len={} spki_suffix={} trusted={}",
                 key.len(),
                 short_hex(key),
-                allowed.len()
+                allowed.values().map(|keys| keys.len()).sum::<usize>()
             );
             Err(Error::General(format!(
                 "untrusted public key spki_len={} spki_suffix={} trusted={}",
                 key.len(),
                 short_hex(key),
-                allowed.len()
+                allowed.values().map(|keys| keys.len()).sum::<usize>()
             )))
         }
     }
@@ -382,6 +430,96 @@ impl ClientCertVerifier for PubkeyVerifier {
 }
 
 impl ServerCertVerifier for PubkeyVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, Error> {
+        self.check_key(end_entity)?;
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug)]
+struct PeerVerifier {
+    allowed_keys: Arc<RwLock<HashMap<String, Vec<Vec<u8>>>>>,
+    peer_did: String,
+}
+
+impl PeerVerifier {
+    fn new(
+        allowed_keys: Arc<RwLock<HashMap<String, Vec<Vec<u8>>>>>,
+        peer_did: String,
+    ) -> Self {
+        Self {
+            allowed_keys,
+            peer_did,
+        }
+    }
+
+    fn check_key(&self, end_entity: &CertificateDer<'_>) -> Result<(), Error> {
+        let key = end_entity.as_ref();
+        let allowed = self.allowed_keys.read().unwrap();
+        let keys = allowed
+            .get(&self.peer_did)
+            .ok_or_else(|| Error::General(format!("no trusted keys for {}", self.peer_did)))?;
+        if keys.iter().any(|k| k.as_slice() == key) {
+            eprintln!(
+                "rpk verify: allow peer={} spki_len={} spki_suffix={}",
+                self.peer_did,
+                key.len(),
+                short_hex(key)
+            );
+            Ok(())
+        } else {
+            eprintln!(
+                "rpk verify: deny peer={} spki_len={} spki_suffix={} trusted={}",
+                self.peer_did,
+                key.len(),
+                short_hex(key),
+                keys.len()
+            );
+            Err(Error::General(format!(
+                "untrusted public key for {} spki_len={} spki_suffix={} trusted={}",
+                self.peer_did,
+                key.len(),
+                short_hex(key),
+                keys.len()
+            )))
+        }
+    }
+}
+
+impl ServerCertVerifier for PeerVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
@@ -589,6 +727,7 @@ pub fn build_client_config(
     Ok(config)
 }
 
+#[cfg(feature = "http")]
 pub async fn send_request(
     url: &Url,
     client_config: Arc<ClientConfig>,
@@ -633,11 +772,13 @@ pub async fn send_request(
     Ok(response)
 }
 
+#[cfg(feature = "http")]
 pub async fn fetch_peer_keys(
     url: &Url,
     client_config: Arc<ClientConfig>,
     connect_addr: Option<SocketAddr>,
     server_name: ServerName<'static>,
+    expected_did: &str,
 ) -> Result<Vec<Vec<u8>>, BoxError> {
     fetch_peer_keys_with_config(
         url,
@@ -645,16 +786,19 @@ pub async fn fetch_peer_keys(
         connect_addr,
         server_name,
         BootstrapConfig::default(),
+        expected_did,
     )
     .await
 }
 
+#[cfg(feature = "http")]
 pub async fn fetch_peer_keys_with_config(
     url: &Url,
     client_config: Arc<ClientConfig>,
     connect_addr: Option<SocketAddr>,
     server_name: ServerName<'static>,
     config: BootstrapConfig,
+    expected_did: &str,
 ) -> Result<Vec<Vec<u8>>, BoxError> {
     let mut last_err: Option<BoxError> = None;
 
@@ -677,7 +821,7 @@ pub async fn fetch_peer_keys_with_config(
                 if response.status() == StatusCode::OK {
                     let bytes = to_bytes(response.into_body()).await?;
                     let doc: serde_json::Value = serde_json::from_slice(bytes.as_ref())?;
-                    return extract_keys_from_did(&doc);
+                    return extract_keys_from_did(&doc, expected_did);
                 }
                 last_err = Some(format!("did.json fetch failed: {}", response.status()).into());
             }
@@ -698,7 +842,19 @@ pub async fn fetch_peer_keys_with_config(
     Err(last_err.unwrap_or_else(|| "did.json fetch failed".into()))
 }
 
-fn extract_keys_from_did(doc: &serde_json::Value) -> Result<Vec<Vec<u8>>, BoxError> {
+fn extract_keys_from_did(doc: &serde_json::Value, expected_did: &str) -> Result<Vec<Vec<u8>>, BoxError> {
+    let doc_id = doc
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("did.json missing id")?;
+    if doc_id != expected_did {
+        return Err(format!(
+            "did.json id mismatch (expected {} got {})",
+            expected_did, doc_id
+        )
+        .into());
+    }
+
     let methods = doc
         .get("verificationMethod")
         .and_then(|v| v.as_array())
@@ -706,6 +862,11 @@ fn extract_keys_from_did(doc: &serde_json::Value) -> Result<Vec<Vec<u8>>, BoxErr
 
     let mut keys = Vec::new();
     for method in methods {
+        if let Some(controller) = method.get("controller").and_then(|v| v.as_str()) {
+            if controller != expected_did {
+                continue;
+            }
+        }
         let multibase = match method.get("publicKeyMultibase").and_then(|v| v.as_str()) {
             Some(value) => value,
             None => continue,
@@ -805,4 +966,64 @@ fn short_hex(bytes: &[u8]) -> String {
         .map(|b| format!("{:02x}", b))
         .collect::<Vec<_>>()
         .join("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn did_web_to_urls_with_port() {
+        let (base, did) = did_web_to_urls("did:web:localhost%3A8443").unwrap();
+        assert_eq!(base.as_str(), "https://localhost:8443/");
+        assert_eq!(did.as_str(), "https://localhost:8443/.well-known/did.json");
+    }
+
+    #[test]
+    fn did_web_to_urls_with_path() {
+        let (base, did) = did_web_to_urls("did:web:example.com:user:svc").unwrap();
+        assert_eq!(base.as_str(), "https://example.com/user/svc/");
+        assert_eq!(did.as_str(), "https://example.com/user/svc/did.json");
+    }
+
+    #[test]
+    fn did_web_from_url_round_trip() {
+        let did = did_web_from_url(&Url::parse("https://example.com/.well-known/did.json").unwrap())
+            .unwrap();
+        assert_eq!(did, "did:web:example.com");
+
+        let did = did_web_from_url(&Url::parse("https://example.com/user/svc/did.json").unwrap())
+            .unwrap();
+        assert_eq!(did, "did:web:example.com:user:svc");
+    }
+
+    #[test]
+    fn multibase_round_trip() {
+        let key = vec![7u8; 32];
+        let encoded = encode_multibase_ed25519(&key).unwrap();
+        let decoded = decode_multibase_ed25519(&encoded).unwrap();
+        assert_eq!(decoded, key);
+    }
+
+    #[test]
+    fn extract_keys_requires_matching_id() {
+        let identity = generate_identity().unwrap();
+        let did = "did:web:example.com";
+        let doc = build_did_json(did, &identity.public_key).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        let err = extract_keys_from_did(&value, "did:web:other.example.com").unwrap_err();
+        assert!(err.to_string().contains("id mismatch"));
+    }
+
+    #[test]
+    fn extract_keys_returns_spki() {
+        let identity = generate_identity().unwrap();
+        let did = "did:web:example.com";
+        let doc = build_did_json(did, &identity.public_key).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        let keys = extract_keys_from_did(&value, did).unwrap();
+        assert_eq!(keys.len(), 1);
+        let expected_spki = spki_from_raw_pubkey(&identity.public_key).unwrap();
+        assert_eq!(keys[0], expected_spki);
+    }
 }

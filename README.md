@@ -30,6 +30,15 @@ The core logic lives in `src/lib.rs` and exposes two primitives:
 Dial-by-DID is the default. An explicit connect address is only needed when the
 DNS identity differs from the connect address (e.g., localhost demos or split
 identity vs transport).
+Trusted keys are stored per peer DID, so a key for one peer cannot authenticate
+as another.
+
+Feature flags:
+- `http` (default): enables DID resolution and `Node::dial*` helpers.
+- `--no-default-features`: opt out of HTTP resolution and use `dial_with_keys*`.
+
+For custom resolution (e.g., CRD cache, static bundle), implement `DidResolver`
+and call `dial_with_resolver`.
 
 ## Run
 

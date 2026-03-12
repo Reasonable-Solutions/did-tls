@@ -8,14 +8,20 @@ license = "MIT"
 
 [dependencies]
 bs58 = "0.5"
-clap = { version = "4.5", features = ["derive"] }
 ed25519-dalek = { version = "2.2", features = ["pkcs8", "rand_core"] }
-hyper = { version = "0.14", features = ["full"] }
+hyper = { version = "0.14", features = ["full"], optional = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 percent-encoding = "2.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.37", features = ["full"] }
+tokio = { version = "1.37", features = ["net", "time", "rt-multi-thread", "macros"] }
 tokio-rustls = "0.26"
 url = "2.5"
 rustls = "0.23"
+
+[features]
+default = ["http"]
+http = ["dep:hyper"]
+
+[dev-dependencies]
+clap = { version = "4.5", features = ["derive"] }
